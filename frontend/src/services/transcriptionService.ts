@@ -28,12 +28,21 @@ export const transcriptionService = {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       currentStream = stream;
 
-      let options: MediaRecorderOptions = {};
-      if (MediaRecorder.isTypeSupported("audio/webm")) {
-        options.mimeType = "audio/webm";
-      }
+      let options = { mimeType: "audio/webm; codecs=opus" };
 
-      mediaRecorder = new MediaRecorder(stream, options);
+// Browser check
+if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+  console.warn("Opus codec unsupported, falling back to audio/webm");
+  options = { mimeType: "audio/webm" };
+}
+
+if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+  console.warn("WebM unsupported, falling back to audio/ogg");
+  options = { mimeType: "audio/ogg; codecs=opus" };
+}
+
+mediaRecorder = new MediaRecorder(stream, options);
+
       isRecording = true;
 
       mediaRecorder.onstart = () => {
