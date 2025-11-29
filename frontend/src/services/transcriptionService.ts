@@ -9,7 +9,7 @@ export interface StreamResult {
 let mediaRecorder: MediaRecorder | null = null;
 let isRecording = false;
 let audioQueue: BlobPart[] = [];
-let chunkInterval: any = null;
+let intervalId: any = null;
 
 export const transcriptionService = {
   async startListening(
@@ -22,7 +22,7 @@ export const transcriptionService = {
       onStatus("Requesting microphone access...");
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
-      let options = { mimeType: "audio/webm; codecs=opus" };
+      let options: MediaRecorderOptions = { mimeType: "audio/webm; codecs=opus" };
       if (!MediaRecorder.isTypeSupported(options.mimeType)) {
         options = { mimeType: "audio/webm" };
       }
@@ -31,23 +31,21 @@ export const transcriptionService = {
       isRecording = true;
       audioQueue = [];
 
-      mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0) audioQueue.push(event.data);
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data.size > 0) audioQueue.push(e.data);
       };
 
-      mediaRecorder.onerror = () => onError("MediaRecorder error");
+      mediaRecorder.start(500); // 0.5-second chunks
 
-      mediaRecorder.start(1000); // 1 second chunks
-      onStatus("Listening… streaming audio");
+      onStatus("Streaming...");
 
-      // Send audio every 1 second
-      chunkInterval = setInterval(async () => {
-        if (!isRecording || audioQueue.length === 0) return;
+      intervalId = setInterval(async () => {
+        if (audioQueue.length === 0) return;
 
         const chunk = new Blob(audioQueue, {
           type: mediaRecorder?.mimeType || "audio/webm",
         });
-        audioQueue = []; // flush buffer
+        audioQueue = [];
 
         const formData = new FormData();
         formData.append("session_id", sessionId);
@@ -62,29 +60,28 @@ export const transcriptionService = {
           const data: StreamResult = await res.json();
 
           if (data.error) {
-            console.error(data.error);
             onStatus("Backend error");
+            console.error("Backend error:", data.error);
             return;
           }
 
           if (data.new_korean || data.new_english) {
             onDelta(data.new_korean, data.new_english);
           }
-        } catch (e) {
-          console.error(e);
-          onStatus("Error sending audio to backend");
+        } catch (err) {
+          console.error(err);
+          onError("Error sending audio to backend");
         }
-      }, 1200);
+      }, 800);
     } catch (err) {
       console.error(err);
-      onError("Could not access microphone");
+      onError("Mic error");
     }
   },
 
   stopListening() {
     isRecording = false;
-    if (chunkInterval) clearInterval(chunkInterval);
-
+    if (intervalId) clearInterval(intervalId);
     if (mediaRecorder && mediaRecorder.state !== "inactive") {
       mediaRecorder.stop();
     }

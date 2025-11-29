@@ -64,7 +64,7 @@ function App() {
       timestamp: new Date(),
     };
     setTranscriptions((prev) => [...prev, newEntry]);
-    saveTranscription(korean, english);
+    void saveTranscription(korean, english);
   };
 
   const handleStartListening = async () => {
@@ -73,21 +73,27 @@ function App() {
     setIsListening(true);
     setCurrentStatus("Requesting microphone access...");
 
-    await transcriptionService.startListening(
-      sessionId,
-      (newKorean: string, newEnglish: string) => {
-        // called every time backend returns a delta
-        addTranscription(newKorean, newEnglish);
-        setCurrentStatus("Listening... streaming audio");
-      },
-      (status: string) => {
-        setCurrentStatus(status);
-      },
-      (errorMsg: string) => {
-        setCurrentStatus(errorMsg);
-        setIsListening(false);
-      }
-    );
+    try {
+      await transcriptionService.startListening(
+        sessionId,
+        (newKorean: string, newEnglish: string) => {
+          // Called every time backend returns a delta
+          addTranscription(newKorean, newEnglish);
+          setCurrentStatus("Listening... streaming audio");
+        },
+        (status: string) => {
+          setCurrentStatus(status);
+        },
+        (errorMsg: string) => {
+          setCurrentStatus(errorMsg);
+          setIsListening(false);
+        }
+      );
+    } catch (e) {
+      console.error(e);
+      setCurrentStatus("Failed to start listening");
+      setIsListening(false);
+    }
   };
 
   const handleStopListening = () => {
