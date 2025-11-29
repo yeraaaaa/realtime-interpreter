@@ -1,3 +1,4 @@
+// frontend/src/services/transcriptionService.ts
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL;
 
 export interface StreamResult {
@@ -7,9 +8,8 @@ export interface StreamResult {
 }
 
 let mediaRecorder: MediaRecorder | null = null;
-let isRecording = false;
 let audioQueue: BlobPart[] = [];
-let intervalId: any = null;
+let intervalId: number | null = null;
 
 export const transcriptionService = {
   async startListening(
@@ -24,23 +24,30 @@ export const transcriptionService = {
 
       let options: MediaRecorderOptions = { mimeType: "audio/webm; codecs=opus" };
       if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+        console.warn("Opus codec unsupported, falling back to audio/webm");
         options = { mimeType: "audio/webm" };
       }
 
       mediaRecorder = new MediaRecorder(stream, options);
-      isRecording = true;
       audioQueue = [];
 
       mediaRecorder.ondataavailable = (e) => {
-        if (e.data.size > 0) audioQueue.push(e.data);
+        if (e.data && e.data.size > 0) {
+          audioQueue.push(e.data);
+        }
       };
 
-      mediaRecorder.start(500); // 0.5-second chunks
+      mediaRecorder.onerror = (e) => {
+        console.error("MediaRecorder error:", e);
+        onError("MediaRecorder error");
+      };
 
-      onStatus("Streaming...");
+      mediaRecorder.start(500); // 0.5s chunks
+      onStatus("Streaming audio…");
 
-      intervalId = setInterval(async () => {
-        if (audioQueue.length === 0) return;
+      // send chunks every 0.8s
+      intervalId = window.setInterval(async () => {
+        if (!audioQueue.length) return;
 
         const chunk = new Blob(audioQueue, {
           type: mediaRecorder?.mimeType || "audio/webm",
@@ -60,8 +67,8 @@ export const transcriptionService = {
           const data: StreamResult = await res.json();
 
           if (data.error) {
-            onStatus("Backend error");
             console.error("Backend error:", data.error);
+            onStatus("Backend error");
             return;
           }
 
@@ -75,13 +82,15 @@ export const transcriptionService = {
       }, 800);
     } catch (err) {
       console.error(err);
-      onError("Mic error");
+      onError("Could not access microphone");
     }
   },
 
   stopListening() {
-    isRecording = false;
-    if (intervalId) clearInterval(intervalId);
+    if (intervalId !== null) {
+      window.clearInterval(intervalId);
+      intervalId = null;
+    }
     if (mediaRecorder && mediaRecorder.state !== "inactive") {
       mediaRecorder.stop();
     }
