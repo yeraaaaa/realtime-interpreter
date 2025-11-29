@@ -1,153 +1,142 @@
+# main.py
 import io
 import os
-from fastapi import FastAPI, UploadFile, File, Form
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from openai import OpenAI
 
-# Make sure OPENAI_API_KEY is set in Render env vars
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+client = OpenAI()
 
 app = FastAPI()
 
+# ---- CORS (allow your Vite frontend) ----
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # for dev; restrict later
+    allow_origins=["*"],  # for dev; later restrict to your domain
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# ---- Models ----
+class ResetSessionBody(BaseModel):
+    session_id: str
+
 
 @app.get("/")
-async def root():
-    return {"status": "ok", "message": "Interpreter backend running"}
+def health():
+    return {"status": "ok"}
 
 
-# --------------------------------------------------------------------
-# 1) SIMPLE CHUNK ENDPOINT (what your frontend is actually calling now)
-#    POST /api/transcribe-chunk
-# --------------------------------------------------------------------
+# ---- MAIN ENDPOINT: /api/transcribe-chunk ----
 @app.post("/api/transcribe-chunk")
-async def transcribe_chunk(audio: UploadFile = File(...)):
+async def transcribe_chunk(
+    file: UploadFile = File(...),
+):
     """
-    This matches your current frontend calls:
-    - URL: /api/transcribe-chunk
-    - Returns: {korean: "...", english: "..."}
+    Receives a short audio chunk and returns Korean + English text.
+    The frontend sends multipart/form-data with field name 'file'.
     """
     try:
-        data = await audio.read()
-        if not data:
-            return {"korean": "", "english": ""}
+        # 1) Read bytes
+        raw_bytes = await file.read()
+        if not raw_bytes:
+            raise HTTPException(status_code=400, detail="Empty audio file")
 
-        audio_file = io.BytesIO(data)
-        audio_file.name = audio.filename or "audio.webm"
+        # 2) Wrap as file-like for OpenAI
+        audio_file = io.BytesIO(raw_bytes)
+        # Give it an extension so OpenAI can infer format
+        audio_file.name = "chunk.webm"
 
-        # Use new model that works well with browser audio
+        # 3) Transcribe audio -> text (Korean speech)
+        #    Use mini transcription model for speed.
         transcript = client.audio.transcriptions.create(
-            model="gpt-4o-transcribe",
+            model="gpt-4o-mini-transcribe",
             file=audio_file,
-            language="ko",
+            response_format="json",
         )
-        korean_text = (transcript.text or "").strip()
 
-        if not korean_text:
-            return {"korean": "", "english": ""}
+        raw_text = transcript.text or ""
+        raw_text = raw_text.strip()
 
+        if not raw_text:
+            return {"korean": "", "english": "", "error": ""}
+
+        # 4) Ask GPT to split into {korean, english}
+        #    If speaker said Korean, 'korean' is original and english is translation.
+        #    If speaker said English, we still force a Korean <-> English pair.
         completion = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
                 {
                     "role": "system",
                     "content": (
-                        "Translate Korean speech text into natural, fluent English. "
-                        "Do not explain, just give the translation."
+                        "You are a real-time interpreter between Korean and English. "
+                        "Given the speaker's utterance, output a tiny JSON object with "
+                        'two fields: "korean" and "english". '
+                        '"korean" must be a fluent Korean sentence. '
+                        '"english" must be a natural English translation. '
+                        "If the original utterance is already in one language, translate it to the other. "
+                        "Do not add explanations. Respond ONLY with JSON."
                     ),
                 },
-                {"role": "user", "content": korean_text},
+                {
+                    "role": "user",
+                    "content": raw_text,
+                },
             ],
+            temperature=0.2,
         )
 
-        english_text = completion.choices[0].message.content.strip()
-        return {"korean": korean_text, "english": english_text}
+        content = completion.choices[0].message.content.strip()
 
-    except Exception as e:
-        print("ERROR /api/transcribe-chunk:", repr(e))
-        return {"korean": "", "english": "", "error": str(e)}
+        # Try to parse JSON safely
+        import json
 
-
-# --------------------------------------------------------------------
-# 2) STREAMING ENDPOINTS (you can use these later if you want true streaming)
-#    POST /api/stream_chunk
-#    POST /api/stream_reset
-# --------------------------------------------------------------------
-session_buffers: dict[str, bytearray] = {}
-session_previous_text: dict[str, str] = {}
-
-
-@app.post("/api/stream_chunk")
-async def stream_chunk(
-    session_id: str = Form(...),
-    audio: UploadFile = File(...),
-):
-    """
-    Streaming-style endpoint:
-    - appends chunks for each session_id
-    - re-transcribes full audio
-    - returns only new text since last call
-    """
-    try:
-        chunk = await audio.read()
-        if not chunk:
-            return {"new_korean": "", "new_english": ""}
-
-        if session_id not in session_buffers:
-            session_buffers[session_id] = bytearray()
-            session_previous_text[session_id] = ""
-
-        session_buffers[session_id].extend(chunk)
-
-        combined = io.BytesIO(session_buffers[session_id])
-        combined.name = "combined.webm"
-
-        transcript = client.audio.transcriptions.create(
-            model="gpt-4o-transcribe",
-            file=combined,
-            language="ko",
-        )
-        full_korean = (transcript.text or "").strip()
-        prev = session_previous_text[session_id]
-
-        if full_korean.startswith(prev):
-            new_korean = full_korean[len(prev):].strip()
-        else:
-            new_korean = full_korean
-
-        session_previous_text[session_id] = full_korean
-
-        if new_korean:
-            completion = client.chat.completions.create(
+        try:
+            parsed = json.loads(content)
+            korean = parsed.get("korean", "").strip()
+            english = parsed.get("english", "").strip()
+        except Exception:
+            # Fallback: just treat transcript as Korean and translate again
+            korean = raw_text
+            translation = client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
                     {
                         "role": "system",
-                        "content": "Translate Korean speech to natural English.",
+                        "content": "Translate the following Korean sentence into natural English.",
                     },
-                    {"role": "user", "content": new_korean},
+                    {"role": "user", "content": korean},
                 ],
+                temperature=0.1,
             )
-            new_english = completion.choices[0].message.content.strip()
-        else:
-            new_english = ""
+            english = translation.choices[0].message.content.strip()
 
-        return {"new_korean": new_korean, "new_english": new_english}
+        return {
+            "korean": korean,
+            "english": english,
+            "error": "",
+        }
 
+    except HTTPException:
+        raise
     except Exception as e:
-        print("ERROR /api/stream_chunk:", repr(e))
-        return {"new_korean": "", "new_english": "", "error": str(e)}
+        # Log server-side
+        print("Error in /api/transcribe-chunk:", repr(e))
+        raise HTTPException(
+            status_code=400,
+            detail=f"OpenAI error: {e}",
+        )
 
 
-@app.post("/api/stream_reset")
-async def stream_reset(session_id: str = Form(...)):
-    session_buffers.pop(session_id, None)
-    session_previous_text.pop(session_id, None)
-    return {"status": "reset"}
+# ---- SESSION RESET (optional, for Clear button) ----
+@app.post("/api/reset-session")
+async def reset_session(body: ResetSessionBody):
+    """
+    Currently just a stub so the frontend's Clear button doesn't 500.
+    You can hook this to Supabase later if you want.
+    """
+    print(f"Reset session requested: {body.session_id}")
+    return {"ok": True}
