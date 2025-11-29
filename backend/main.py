@@ -41,7 +41,7 @@ async def stream_chunk(
 
         # Full transcription
         transcript = client.audio.transcriptions.create(
-            model="whisper-1",
+            model="gpt-4o-transcribe",
             file=combined_audio,
             language="ko"
         )
