@@ -1,6 +1,8 @@
 // frontend/src/services/transcriptionService.ts
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL;
 
+console.log("[transcriptionService] BACKEND_URL =", BACKEND_URL);
+
 export interface StreamResult {
   new_korean: string;
   new_english: string;
@@ -43,7 +45,7 @@ export const transcriptionService = {
       };
 
       mediaRecorder.start(500); // 0.5s chunks
-      onStatus("Streaming audio…");
+      onStatus("Streaming audio… v99"); // <<< marker so we know this code is running
 
       // send chunks every 0.8s
       intervalId = window.setInterval(async () => {
