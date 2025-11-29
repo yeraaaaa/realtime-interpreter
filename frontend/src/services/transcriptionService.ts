@@ -16,7 +16,8 @@ export const transcriptionService = {
     onResult: (res: TranscriptionResult) => void,
     onStatusChange: (status: string) => void,
     onError: (msg: string) => void
-  ) {
+  )
+   {
     try {
       if (!navigator.mediaDevices?.getUserMedia) {
         onError("Your browser does not support microphone access.");
@@ -64,19 +65,38 @@ export const transcriptionService = {
             method: "POST",
             body: formData,
           });
-
+          
+          const text = await res.text();
+          
           if (!res.ok) {
-            throw new Error(`Backend error: ${res.status}`);
+            console.error("Backend error:", res.status, text);
+            onStatusChange?.(`Backend error: ${res.status}`);
+            // Don't completely kill the session on one bad chunk
+            return;
           }
-
-          const data = (await res.json()) as TranscriptionResult;
-
+          
+          let data: TranscriptionResult & { error?: string };
+          try {
+            data = JSON.parse(text);
+          } catch (e) {
+            console.error("Failed to parse backend JSON:", text);
+            onStatusChange?.("Error: invalid JSON from backend");
+            return;
+          }
+          
+          if (data.error) {
+            console.error("Backend reported error:", data.error);
+            onStatusChange?.("Backend internal error");
+            return;
+          }
+          
           if (
             (data.korean && data.korean.trim()) ||
             (data.english && data.english.trim())
           ) {
             onResult(data);
           }
+          
         } catch (err) {
           console.error(err);
           onError("Error sending audio to backend");
