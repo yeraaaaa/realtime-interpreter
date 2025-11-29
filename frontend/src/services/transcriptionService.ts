@@ -1,119 +1,80 @@
-// frontend/src/services/transcriptionService.ts
-const BACKEND_URL =
-  import.meta.env.VITE_BACKEND_URL || "http://localhost:8000";
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL;
 
-export interface TranscriptionResult {
-  korean: string;
-  english: string;
+export interface StreamResult {
+  new_korean: string;
+  new_english: string;
+  error?: string;
 }
 
 let mediaRecorder: MediaRecorder | null = null;
 let isRecording = false;
-let currentStream: MediaStream | null = null;
+let audioQueue: BlobPart[] = [];
+let chunkInterval: any = null;
 
 export const transcriptionService = {
   async startListening(
-    onResult: (res: TranscriptionResult) => void,
-    onStatusChange: (status: string) => void,
-    onError: (msg: string) => void
-  )
-   {
+    sessionId: string,
+    onDelta: (kr: string, en: string) => void,
+    onStatus: (s: string) => void,
+    onError: (s: string) => void
+  ) {
     try {
-      if (!navigator.mediaDevices?.getUserMedia) {
-        onError("Your browser does not support microphone access.");
-        return;
-      }
-
-      onStatusChange("Requesting microphone access...");
+      onStatus("Requesting microphone access...");
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      currentStream = stream;
 
       let options = { mimeType: "audio/webm; codecs=opus" };
+      if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+        options = { mimeType: "audio/webm" };
+      }
 
-// Browser check
-if (!MediaRecorder.isTypeSupported(options.mimeType)) {
-  console.warn("Opus codec unsupported, falling back to audio/webm");
-  options = { mimeType: "audio/webm" };
-}
-
-if (!MediaRecorder.isTypeSupported(options.mimeType)) {
-  console.warn("WebM unsupported, falling back to audio/ogg");
-  options = { mimeType: "audio/ogg; codecs=opus" };
-}
-
-mediaRecorder = new MediaRecorder(stream, options);
-
+      mediaRecorder = new MediaRecorder(stream, options);
       isRecording = true;
+      audioQueue = [];
 
-      mediaRecorder.onstart = () => {
-        onStatusChange("Listening... Speak Korean now");
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) audioQueue.push(event.data);
       };
 
-      mediaRecorder.onstop = () => {
-        onStatusChange("Stopped listening");
-        if (currentStream) {
-          currentStream.getTracks().forEach((t) => t.stop());
-          currentStream = null;
-        }
-      };
+      mediaRecorder.onerror = () => onError("MediaRecorder error");
 
-      mediaRecorder.onerror = (event) => {
-        console.error("MediaRecorder error:", event);
-        onError("MediaRecorder error");
-      };
+      mediaRecorder.start(1000); // 1 second chunks
+      onStatus("Listening… streaming audio");
 
-      mediaRecorder.ondataavailable = async (event) => {
-        if (!isRecording) return;
-        if (!event.data || event.data.size === 0) return;
+      // Send audio every 1 second
+      chunkInterval = setInterval(async () => {
+        if (!isRecording || audioQueue.length === 0) return;
+
+        const chunk = new Blob(audioQueue, {
+          type: mediaRecorder?.mimeType || "audio/webm",
+        });
+        audioQueue = []; // flush buffer
+
+        const formData = new FormData();
+        formData.append("session_id", sessionId);
+        formData.append("audio", chunk, "chunk.webm");
 
         try {
-          const formData = new FormData();
-          formData.append("audio", event.data, "chunk.webm");
-
-          const res = await fetch(`${BACKEND_URL}/api/transcribe-chunk`, {
+          const res = await fetch(`${BACKEND_URL}/api/stream_chunk`, {
             method: "POST",
             body: formData,
           });
-          
-          const text = await res.text();
-          
-          if (!res.ok) {
-            console.error("Backend error:", res.status, text);
-            onStatusChange?.(`Backend error: ${res.status}`);
-            // Don't completely kill the session on one bad chunk
-            return;
-          }
-          
-          let data: TranscriptionResult & { error?: string };
-          try {
-            data = JSON.parse(text);
-          } catch (e) {
-            console.error("Failed to parse backend JSON:", text);
-            onStatusChange?.("Error: invalid JSON from backend");
-            return;
-          }
-          
-          if (data.error) {
-            console.error("Backend reported error:", data.error);
-            onStatusChange?.("Backend internal error");
-            return;
-          }
-          
-          if (
-            (data.korean && data.korean.trim()) ||
-            (data.english && data.english.trim())
-          ) {
-            onResult(data);
-          }
-          
-        } catch (err) {
-          console.error(err);
-          onError("Error sending audio to backend");
-        }
-      };
 
-      // Emit a chunk every 5 seconds
-      mediaRecorder.start(5000);
+          const data: StreamResult = await res.json();
+
+          if (data.error) {
+            console.error(data.error);
+            onStatus("Backend error");
+            return;
+          }
+
+          if (data.new_korean || data.new_english) {
+            onDelta(data.new_korean, data.new_english);
+          }
+        } catch (e) {
+          console.error(e);
+          onStatus("Error sending audio to backend");
+        }
+      }, 1200);
     } catch (err) {
       console.error(err);
       onError("Could not access microphone");
@@ -122,17 +83,19 @@ mediaRecorder = new MediaRecorder(stream, options);
 
   stopListening() {
     isRecording = false;
+    if (chunkInterval) clearInterval(chunkInterval);
+
     if (mediaRecorder && mediaRecorder.state !== "inactive") {
       mediaRecorder.stop();
-      mediaRecorder = null;
-    }
-    if (currentStream) {
-      currentStream.getTracks().forEach((t) => t.stop());
-      currentStream = null;
     }
   },
 
-  clearHistory() {
-    // no-op; you handle this in App.tsx
+  async resetSession(sessionId: string) {
+    const form = new FormData();
+    form.append("session_id", sessionId);
+    await fetch(`${BACKEND_URL}/api/stream_reset`, {
+      method: "POST",
+      body: form,
+    });
   },
 };

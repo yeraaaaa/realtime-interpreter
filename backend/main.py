@@ -1,78 +1,89 @@
-# backend/main.py
-import io
 import os
-from fastapi import FastAPI, UploadFile, File
+import io
+from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+client = OpenAI()
 
 app = FastAPI()
 
+# In-memory map for each session
+session_buffers = {}        # session_id → bytes buffer
+session_previous_text = {}  # session_id → last transcribed text
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # for dev; tighten in prod
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-@app.get("/")
-async def root():
-    return {"status": "ok", "message": "Interpreter backend is running"}
-
-
-@app.post("/api/transcribe-chunk")
-async def transcribe_chunk(audio: UploadFile = File(...)):
-    """
-    Receives a short audio chunk from the browser (webm/ogg/wav),
-    returns Korean + English text.
-    """
+@app.post("/api/stream_chunk")
+async def stream_chunk(
+    session_id: str = Form(...),
+    audio: UploadFile = File(...)
+):
     try:
-        data = await audio.read()
+        chunk = await audio.read()
+        if session_id not in session_buffers:
+            session_buffers[session_id] = bytearray()
+            session_previous_text[session_id] = ""
 
-        if not data:
-            return {"korean": "", "english": ""}
+        # Append chunk to session buffer
+        session_buffers[session_id].extend(chunk)
 
-        audio_file = io.BytesIO(data)
-        audio_file.name = audio.filename or "audio.webm"
+        # Build a BytesIO object for whisper
+        combined_audio = io.BytesIO(session_buffers[session_id])
+        combined_audio.name = "combined.webm"
 
-        # 1) Transcribe Korean with Whisper
+        # Full transcription
         transcript = client.audio.transcriptions.create(
             model="whisper-1",
-            file=audio_file,
-            language="ko",  # force Korean
+            file=combined_audio,
+            language="ko"
         )
-        korean_text = transcript.text or ""
+        full_korean = transcript.text.strip()
 
-        if not korean_text.strip():
-            return {"korean": "", "english": ""}
+        prev = session_previous_text[session_id]
 
-        # 2) Translate to English using chat.completions (simple + stable)
-        completion = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a translation assistant. "
-                        "Translate Korean speech text into natural, fluent English. "
-                        "Do not explain, just give the translation."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": korean_text,
-                },
-            ],
-        )
-        english_text = completion.choices[0].message.content.strip()
+        # Compute delta (new text)
+        if full_korean.startswith(prev):
+            new_korean = full_korean[len(prev):].strip()
+        else:
+            new_korean = full_korean
 
-        return {"korean": korean_text, "english": english_text}
+        # Update previous full transcription
+        session_previous_text[session_id] = full_korean
+
+        # Translate only the delta
+        if new_korean:
+            completion = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system",
+                     "content": "Translate Korean speech to natural English."},
+                    {"role": "user", "content": new_korean},
+                ],
+            )
+            new_english = completion.choices[0].message.content.strip()
+        else:
+            new_english = ""
+
+        return {
+            "new_korean": new_korean,
+            "new_english": new_english
+        }
 
     except Exception as e:
-        # Log server-side for you (Render logs)
-        print("ERROR in /api/transcribe-chunk:", repr(e))
-        # Return safe response to frontend
-        return {"korean": "", "english": "", "error": str(e)}
+        print("STREAM ERROR:", e)
+        return {"new_korean": "", "new_english": "", "error": str(e)}
+
+
+@app.post("/api/stream_reset")
+async def stream_reset(session_id: str = Form(...)):
+    session_buffers.pop(session_id, None)
+    session_previous_text.pop(session_id, None)
+    return {"status": "reset"}

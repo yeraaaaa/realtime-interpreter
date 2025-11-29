@@ -1,10 +1,7 @@
 // frontend/src/App.tsx
 import { useState, useRef, useEffect } from "react";
 import { Mic, MicOff, Volume2, Trash2 } from "lucide-react";
-import {
-  transcriptionService,
-  TranscriptionResult,
-} from "./services/transcriptionService";
+import { transcriptionService } from "./services/transcriptionService";
 
 interface TranscriptionEntry {
   id: string;
@@ -16,12 +13,9 @@ interface TranscriptionEntry {
 function App() {
   const [isListening, setIsListening] = useState(false);
   const [currentStatus, setCurrentStatus] = useState("Ready to start");
-  const [transcriptions, setTranscriptions] = useState<TranscriptionEntry[]>(
-    []
-  );
+  const [transcriptions, setTranscriptions] = useState<TranscriptionEntry[]>([]);
   const [sessionId] = useState<string>(
-    () =>
-      `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+    () => `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
   );
   const transcriptionsEndRef = useRef<HTMLDivElement>(null);
 
@@ -61,6 +55,8 @@ function App() {
   };
 
   const addTranscription = (korean: string, english: string) => {
+    if (!korean.trim() && !english.trim()) return;
+
     const newEntry: TranscriptionEntry = {
       id: `${Date.now()}-${Math.random()}`,
       korean,
@@ -72,13 +68,17 @@ function App() {
   };
 
   const handleStartListening = async () => {
+    if (isListening) return;
+
     setIsListening(true);
     setCurrentStatus("Requesting microphone access...");
 
     await transcriptionService.startListening(
-      (result: TranscriptionResult) => {
-        addTranscription(result.korean, result.english);
-        setCurrentStatus("Listening... Speak Korean now");
+      sessionId,
+      (newKorean: string, newEnglish: string) => {
+        // called every time backend returns a delta
+        addTranscription(newKorean, newEnglish);
+        setCurrentStatus("Listening... streaming audio");
       },
       (status: string) => {
         setCurrentStatus(status);
@@ -91,12 +91,18 @@ function App() {
   };
 
   const handleStopListening = () => {
+    if (!isListening) return;
     transcriptionService.stopListening();
     setIsListening(false);
     setCurrentStatus("Stopped");
   };
 
-  const handleClearTranscriptions = () => {
+  const handleClearTranscriptions = async () => {
+    try {
+      await transcriptionService.resetSession(sessionId);
+    } catch (e) {
+      console.error("Error resetting session:", e);
+    }
     setTranscriptions([]);
     setCurrentStatus("Cleared. Ready to start");
   };
