@@ -103,8 +103,8 @@ export const transcriptionService = {
         }
       };
 
-      // Emit a chunk every 2 seconds
-      mediaRecorder.start(2000);
+      // Emit a chunk every 5 seconds
+      mediaRecorder.start(5000);
     } catch (err) {
       console.error(err);
       onError("Could not access microphone");
